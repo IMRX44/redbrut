@@ -29,49 +29,74 @@ type sessionStartedMsg struct {
 	err     error
 }
 
-// MonitorModel is the live brute-force monitoring screen.
-type MonitorModel struct {
-	session   *app.Session
-	reporter  *output.Reporter
-	cfg       app.Config
-	progress  progress.Model
-	viewport  viewport.Model
+// logBuf is heap-allocated so MonitorModel can be copied without copying a mutex.
+type logBuf struct {
+	mu    sync.Mutex
+	lines []string
+	ch    chan output.Result
+}
 
-	logCh     chan output.Result
-	logLines  []string
-	logMu     sync.Mutex
+func newLogBuf() *logBuf {
+	return &logBuf{ch: make(chan output.Result, 2000)}
+}
+
+func (lb *logBuf) push(line string) {
+	lb.mu.Lock()
+	lb.lines = append(lb.lines, line)
+	if len(lb.lines) > 500 {
+		lb.lines = lb.lines[len(lb.lines)-500:]
+	}
+	lb.mu.Unlock()
+}
+
+func (lb *logBuf) snapshot() string {
+	lb.mu.Lock()
+	s := strings.Join(lb.lines, "\n")
+	lb.mu.Unlock()
+	return s
+}
+
+// MonitorModel is the live brute-force monitoring screen.
+// All mutable shared state is behind pointers so value-copy is safe.
+type MonitorModel struct {
+	session  *app.Session
+	log      *logBuf
+	progress progress.Model
+	viewport viewport.Model
 
 	startTime time.Time
-	lastAttempts int64
 	speed     float64
 
-	width     int
-	height    int
-	done      bool
+	width  int
+	height int
+	done   bool
 }
 
 func NewMonitorModel(width, height int) MonitorModel {
+	vph := height - 14
+	if vph < 4 {
+		vph = 4
+	}
 	prog := progress.New(
 		progress.WithGradient(string(colorPurple), string(colorGreen)),
 		progress.WithWidth(width-8),
 		progress.WithoutPercentage(),
 	)
-	vp := viewport.New(width-4, height-14)
-
 	return MonitorModel{
+		log:       newLogBuf(),
 		progress:  prog,
-		viewport:  vp,
-		logCh:     make(chan output.Result, 2000),
+		viewport:  viewport.New(width-4, vph),
 		startTime: time.Now(),
 		width:     width,
 		height:    height,
 	}
 }
 
+// AddLog is called from worker goroutines — sends result to channel, never blocks.
 func (m *MonitorModel) AddLog(res output.Result) {
 	select {
-	case m.logCh <- res:
-	default: // never block workers
+	case m.log.ch <- res:
+	default:
 	}
 }
 
@@ -83,7 +108,7 @@ func startSessionCmd(cfg app.Config, reporter *output.Reporter) tea.Cmd {
 }
 
 func (m MonitorModel) Init() tea.Cmd {
-	return tea.Batch(tickCmd())
+	return tickCmd()
 }
 
 func (m MonitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -98,16 +123,12 @@ func (m MonitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
-		// Pass to viewport for scroll
-		vp, cmd := m.viewport.Update(msg)
-		m.viewport = vp
-		cmds = append(cmds, cmd)
 
 	case sessionStartedMsg:
 		if msg.err != nil {
 			m.done = true
-			m.logLines = append(m.logLines, styleError.Render("✗ Error: "+msg.err.Error()))
-			m.viewport.SetContent(strings.Join(m.logLines, "\n"))
+			m.log.push(styleError.Render("  ✗ Error: " + msg.err.Error()))
+			m.viewport.SetContent(m.log.snapshot())
 			return m, nil
 		}
 		m.session = msg.session
@@ -115,58 +136,40 @@ func (m MonitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tickCmd())
 
 	case tickMsg:
-		// Drain log channel
-		draining := true
-		for draining {
+		// Drain log channel into buffer
+		for {
 			select {
-			case res := <-m.logCh:
-				line := m.formatResult(res)
-				if line != "" {
-					m.logMu.Lock()
-					m.logLines = append(m.logLines, line)
-					if len(m.logLines) > 500 {
-						m.logLines = m.logLines[len(m.logLines)-500:]
-					}
-					m.logMu.Unlock()
+			case res := <-m.log.ch:
+				if line := formatResult(res); line != "" {
+					m.log.push(line)
 				}
 			default:
-				draining = false
+				goto drained
 			}
 		}
-
-		// Update viewport content
-		m.logMu.Lock()
-		content := strings.Join(m.logLines, "\n")
-		m.logMu.Unlock()
-		m.viewport.SetContent(content)
+	drained:
+		m.viewport.SetContent(m.log.snapshot())
 		m.viewport.GotoBottom()
 
-		// Update speed
 		if m.session != nil {
 			cur := m.session.Stats.Attempts.Load()
-			elapsed := time.Since(m.startTime).Seconds()
-			if elapsed > 0 {
+			if elapsed := time.Since(m.startTime).Seconds(); elapsed > 0 {
 				m.speed = float64(cur) / elapsed
 			}
-
-			// Progress bar
-			total := m.session.Stats.Total
-			if total > 0 {
-				pct := float64(cur) / float64(total)
-				cmds = append(cmds, m.progress.SetPercent(pct))
+			if total := m.session.Stats.Total; total > 0 {
+				cmds = append(cmds, m.progress.SetPercent(float64(cur)/float64(total)))
 			}
-
-			// Check done
 			select {
 			case <-m.session.Done:
 				m.done = true
-				m.logLines = append(m.logLines, "")
-				m.logLines = append(m.logLines, styleSuccess.Render("  ✓ Session complete"))
+				m.log.push("")
+				m.log.push(styleSuccess.Render("  ✓ Session complete"))
+				m.viewport.SetContent(m.log.snapshot())
+				m.viewport.GotoBottom()
 				return m, nil
 			default:
 			}
 		}
-
 		cmds = append(cmds, tickCmd())
 
 	case progress.FrameMsg:
@@ -175,11 +178,14 @@ func (m MonitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		m.width, m.height = msg.Width, msg.Height
 		m.progress.Width = msg.Width - 8
 		m.viewport.Width = msg.Width - 4
-		m.viewport.Height = msg.Height - 14
+		vph := msg.Height - 14
+		if vph < 4 {
+			vph = 4
+		}
+		m.viewport.Height = vph
 	}
 
 	vp, cmd := m.viewport.Update(msg)
@@ -204,19 +210,16 @@ func (m MonitorModel) View() string {
 
 	var b strings.Builder
 
-	// Title bar
 	b.WriteString(styleHeader.Render(" redbrut  ▸  RDP Credential Testing"))
 	b.WriteString("\n")
 
-	// Progress row
 	var pctStr string
 	if total > 0 {
-		pct := float64(attempts) / float64(total) * 100
-		pctStr = fmt.Sprintf("%.1f%%", pct)
+		pctStr = fmt.Sprintf("%.1f%%", float64(attempts)/float64(total)*100)
 	} else {
 		pctStr = "--"
 	}
-	b.WriteString(fmt.Sprintf("  %s  %s  /  %s  (%s)  %s\n",
+	b.WriteString(fmt.Sprintf("  %s  %s / %s  (%s)  elapsed: %s\n",
 		styleDim.Render("Progress:"),
 		styleValue.Render(fmt.Sprintf("%d", attempts)),
 		styleValue.Render(fmt.Sprintf("%d", total)),
@@ -227,37 +230,31 @@ func (m MonitorModel) View() string {
 	b.WriteString(m.progress.View())
 	b.WriteString("\n\n")
 
-	// Stats row
 	b.WriteString("  ")
 	b.WriteString(styleFoundStat.Render(fmt.Sprintf("✓ Found: %d", found)))
-	b.WriteString(styleLockedStat.Render(fmt.Sprintf("⊘ Locked: %d", locked)))
-	b.WriteString(styleErrorStat.Render(fmt.Sprintf("✗ Errors: %d", errors)))
-	b.WriteString(styleRetryStat.Render(fmt.Sprintf("↻ Retry: %d", retrying)))
-	b.WriteString(styleSpeedStat.Render(fmt.Sprintf("⚡ %.0f req/s", m.speed)))
+	b.WriteString(styleLockedStat.Render(fmt.Sprintf("  ⊘ Locked: %d", locked)))
+	b.WriteString(styleErrorStat.Render(fmt.Sprintf("  ✗ Errors: %d", errors)))
+	b.WriteString(styleRetryStat.Render(fmt.Sprintf("  ↻ Retry: %d", retrying)))
+	b.WriteString(styleSpeedStat.Render(fmt.Sprintf("  ⚡ %.0f req/s", m.speed)))
 	b.WriteString("\n\n")
 
-	// Log divider
 	divider := styleDim.Render("  " + strings.Repeat("─", m.width-6))
 	b.WriteString(divider)
 	b.WriteString("\n")
-
-	// Viewport (scrollable log)
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 	b.WriteString(divider)
 	b.WriteString("\n")
 
-	// Footer
 	if m.done {
 		b.WriteString(styleHint.Render("  Session complete  •  q to quit"))
 	} else {
 		b.WriteString(styleHint.Render("  ↑↓ scroll log  •  q to stop & quit"))
 	}
-
 	return b.String()
 }
 
-func (m MonitorModel) formatResult(res output.Result) string {
+func formatResult(res output.Result) string {
 	switch res.Status {
 	case classifier.ResultSuccess, classifier.ResultExpired:
 		return styleSuccess.Render(fmt.Sprintf(
