@@ -20,11 +20,11 @@ type Result struct {
 
 // Reporter writes results to goods.txt and resume.state.
 type Reporter struct {
-	mu          sync.Mutex
-	goodsFile   *os.File
-	resumeFile  *os.File
-	jsonMode    bool
-	foundCount  int
+	mu         sync.Mutex
+	goodsFile  *os.File
+	resumeFile *os.File
+	jsonMode   bool
+	NotifyFn   func(Result) // called on every result; must be non-blocking
 }
 
 func NewReporter(goodsPath, resumePath string, jsonMode bool) (*Reporter, error) {
@@ -45,17 +45,15 @@ func (r *Reporter) Close() {
 	r.resumeFile.Close()
 }
 
-// WriteResult records a completed job. Called from worker pool.
+// WriteResult records a completed job.
 func (r *Reporter) WriteResult(res Result) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Always append to resume.state
 	fmt.Fprintf(r.resumeFile, "%s\t%s\t%s\t%s\n",
 		res.Job.Target, res.Job.Username, res.Job.Password, res.Status)
 
 	if res.Status.IsSuccess() {
-		r.foundCount++
 		if r.jsonMode {
 			entry := map[string]string{
 				"target":   res.Job.Target.String(),
@@ -70,12 +68,10 @@ func (r *Reporter) WriteResult(res Result) {
 				res.Job.Target, res.Job.Username, res.Job.Password)
 		}
 	}
-}
 
-func (r *Reporter) FoundCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.foundCount
+	if r.NotifyFn != nil {
+		r.NotifyFn(res)
+	}
 }
 
 // LoadResumeState reads resume.state and returns a set of already-completed job keys.
@@ -96,8 +92,7 @@ func LoadResumeState(path string) (map[string]bool, error) {
 		if n == 0 {
 			break
 		}
-		key := target + "\t" + user + "\t" + pass
-		done[key] = true
+		done[target+"\t"+user+"\t"+pass] = true
 	}
 	return done, nil
 }
