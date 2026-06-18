@@ -39,10 +39,10 @@ func newConfigPanel(state *UIState, win fyne.Window) fyne.CanvasObject {
 		})
 	}
 
-	targetsRow := container.NewBorderLayout(nil, nil, nil, makeBrowse(targetsEntry), targetsEntry)
-	usersRow := container.NewBorderLayout(nil, nil, nil, makeBrowse(usersEntry), usersEntry)
-	passRow := container.NewBorderLayout(nil, nil, nil, makeBrowse(passEntry), passEntry)
-	outputRow := container.NewBorderLayout(nil, nil, nil, makeBrowse(outputEntry), outputEntry)
+	targetsRow := container.NewBorder(nil, nil, nil, makeBrowse(targetsEntry), targetsEntry)
+	usersRow := container.NewBorder(nil, nil, nil, makeBrowse(usersEntry), usersEntry)
+	passRow := container.NewBorder(nil, nil, nil, makeBrowse(passEntry), passEntry)
+	outputRow := container.NewBorder(nil, nil, nil, makeBrowse(outputEntry), outputEntry)
 
 	// --- Settings ---
 	concEntry := widget.NewEntry()
