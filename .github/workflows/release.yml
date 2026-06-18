@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,58 +22,13 @@ jobs:
           go-version: '1.24'
 
       - name: Build Linux amd64
-        run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
-            -o redbrut-linux-amd64 ./cmd/redbrut-linux/
+        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o redbrut-linux-amd64 ./cmd/redbrut-linux/
 
       - name: Build Linux arm64
-        run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" \
-            -o redbrut-linux-arm64 ./cmd/redbrut-linux/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-binaries
-          path: redbrut-linux-*
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-
-      - name: Install build dependencies
-        run: |
-          choco install mingw -y --no-progress
-          refreshenv
+        run: GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o redbrut-linux-arm64 ./cmd/redbrut-linux/
 
       - name: Build Windows amd64
-        shell: cmd
-        run: |
-          set CGO_ENABLED=1
-          set GOOS=windows
-          set GOARCH=amd64
-          go build -ldflags="-s -w -H windowsgui" -o redbrut-windows-amd64.exe ./cmd/redbrut-windows/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-binaries
-          path: redbrut-windows-*.exe
-
-  release:
-    needs: [build-linux, build-windows]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-binaries
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-binaries
+        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o redbrut-windows-amd64.exe ./cmd/redbrut-windows/
 
       - name: Create checksums
         run: sha256sum redbrut-linux-amd64 redbrut-linux-arm64 redbrut-windows-amd64.exe > checksums.txt
@@ -99,7 +54,7 @@ jobs:
             - NTLMv2 with UTF-16LE encoding — Russian/Chinese/Arabic passwords work
             - 5,000 goroutines vs NLBrute's 500 OS threads
             - NTSTATUS classification — zero false negatives
-            - Interactive bubbletea TUI (Linux) + dark fyne GUI (Windows)
+            - Interactive TUI (Linux & Windows Terminal) — form config + live monitor
             - Per-IP rate limiting, resume support, password spray mode
           files: |
             redbrut-linux-amd64
