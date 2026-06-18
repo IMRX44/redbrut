@@ -465,8 +465,10 @@ func extractTokenBytes(data []byte) []byte {
 	return nil
 }
 
-// extractNTStatusFromTSRequest extracts the NTSTATUS from TSErrorCode field [4]
-// or from a TSCredentials/errorCode in the final CredSSP exchange.
+// extractNTStatusFromTSRequest extracts the NTSTATUS from the final server TSRequest.
+//
+// On SUCCESS the server sends pubKeyAuth [3] — no errorCode field at all.
+// On FAILURE the server sends errorCode [4] containing the NTSTATUS.
 func extractNTStatusFromTSRequest(data []byte) (uint32, error) {
 	var outer asn1.RawValue
 	_, err := asn1.Unmarshal(data, &outer)
@@ -481,19 +483,25 @@ func extractNTStatusFromTSRequest(data []byte) (uint32, error) {
 		if err != nil {
 			break
 		}
-		// [4] = errorCode in TSRequest
-		if field.Class == asn1.ClassContextSpecific && field.Tag == 4 {
+		if field.Class != asn1.ClassContextSpecific {
+			continue
+		}
+		switch field.Tag {
+		case 3:
+			// pubKeyAuth present → server accepted our credentials → SUCCESS
+			return classifier.NTStatusSuccess, nil
+		case 4:
+			// errorCode → auth failed, extract NTSTATUS
 			var codeVal asn1.RawValue
 			if _, err := asn1.Unmarshal(field.Bytes, &codeVal); err == nil {
 				if len(codeVal.Bytes) >= 4 {
-					// errorCode is signed INTEGER but Windows sends NTSTATUS as uint32
 					code := binary.BigEndian.Uint32(codeVal.Bytes[len(codeVal.Bytes)-4:])
 					return code, nil
 				}
 			}
 		}
 	}
-	return 0, fmt.Errorf("errorCode not found in TSRequest")
+	return 0, fmt.Errorf("neither pubKeyAuth nor errorCode found in TSRequest")
 }
 
 // --- helpers ---
