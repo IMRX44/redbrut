@@ -1,4 +1,4 @@
-//go:build linux || windows
+//go:build linux
 
 package tui
 
@@ -13,35 +13,56 @@ import (
 )
 
 type formSubmittedMsg struct {
-	cfg       app.Config
-	goodsPath string
-	resume    bool
+	cfg app.Config
 }
 
+// FormModel holds heap-allocated pointer bindings so huh and FormModel
+// always share the same memory even after value-copy by bubbletea.
 type FormModel struct {
-	huhForm     *huh.Form
-	cfg         app.Config
-	modeStr     string
-	concStr     string
-	rateStr     string
-	timeoutStr  string
-	retriesStr  string
-	err         string
-	width       int
-	height      int
+	huhForm *huh.Form
+
+	pTargets *string
+	pUsers   *string
+	pPass    *string
+	pOutput  *string
+	pConc    *string
+	pRate    *string
+	pTimeout *string
+	pMode    *string
+	pResume  *bool
+
+	cfg    app.Config
+	err    string
+	width  int
+	height int
 }
 
 func NewFormModel(width, height int) FormModel {
 	cfg := app.DefaultConfig()
+
+	targets := ""
+	users := ""
+	pass := ""
+	output := cfg.OutputFile
+	conc := "5000"
+	rate := "5"
+	timeout := "5"
+	mode := "credential"
+	resume := false
+
 	m := FormModel{
-		cfg:        cfg,
-		modeStr:    "credential",
-		concStr:    "5000",
-		rateStr:    "5",
-		timeoutStr: "5",
-		retriesStr: "3",
-		width:      width,
-		height:     height,
+		pTargets: &targets,
+		pUsers:   &users,
+		pPass:    &pass,
+		pOutput:  &output,
+		pConc:    &conc,
+		pRate:    &rate,
+		pTimeout: &timeout,
+		pMode:    &mode,
+		pResume:  &resume,
+		cfg:      cfg,
+		width:    width,
+		height:   height,
 	}
 	m.huhForm = m.buildForm()
 	return m
@@ -59,28 +80,28 @@ func (m FormModel) buildForm() *huh.Form {
 				Title("Targets File").
 				Description("IP:PORT per line (e.g. targets.txt)").
 				Placeholder("targets.txt").
-				Value(&m.cfg.TargetsFile),
+				Value(m.pTargets),
 
 			huh.NewInput().
 				Key("users").
 				Title("Users File").
 				Description("One username per line").
 				Placeholder("users.txt").
-				Value(&m.cfg.UsersFile),
+				Value(m.pUsers),
 
 			huh.NewInput().
 				Key("passwords").
 				Title("Passwords File").
 				Description("One password per line (UTF-8, Cyrillic/Chinese OK)").
 				Placeholder("passwords.txt").
-				Value(&m.cfg.PassFile),
+				Value(m.pPass),
 
 			huh.NewInput().
 				Key("output").
 				Title("Output File").
 				Description("Found credentials saved here").
 				Placeholder("goods.txt").
-				Value(&m.cfg.OutputFile),
+				Value(m.pOutput),
 		),
 		huh.NewGroup(
 			huh.NewNote().
@@ -92,7 +113,7 @@ func (m FormModel) buildForm() *huh.Form {
 				Title("Concurrency").
 				Description("Goroutines (50–50000)").
 				Placeholder("5000").
-				Value(&m.concStr).
+				Value(m.pConc).
 				Validate(func(s string) error {
 					n, err := strconv.Atoi(s)
 					if err != nil || n < 1 || n > 100000 {
@@ -106,7 +127,7 @@ func (m FormModel) buildForm() *huh.Form {
 				Title("Rate per IP/s").
 				Description("Max attempts per IP per second").
 				Placeholder("5").
-				Value(&m.rateStr).
+				Value(m.pRate).
 				Validate(func(s string) error {
 					n, err := strconv.ParseFloat(s, 64)
 					if err != nil || n <= 0 {
@@ -120,7 +141,7 @@ func (m FormModel) buildForm() *huh.Form {
 				Title("Timeout (seconds)").
 				Description("Per-attempt timeout").
 				Placeholder("5").
-				Value(&m.timeoutStr).
+				Value(m.pTimeout).
 				Validate(func(s string) error {
 					n, err := strconv.Atoi(s)
 					if err != nil || n < 1 {
@@ -137,12 +158,12 @@ func (m FormModel) buildForm() *huh.Form {
 					huh.NewOption("Credential (all passwords per target)", "credential"),
 					huh.NewOption("Password Spray (rotate passwords across targets)", "spray"),
 				).
-				Value(&m.modeStr),
+				Value(m.pMode),
 
 			huh.NewConfirm().
 				Key("resume").
 				Title("Resume previous session?").
-				Value(&m.cfg.Resume),
+				Value(m.pResume),
 		),
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(min(m.width-4, 80))
@@ -157,19 +178,23 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.huhForm = form.(*huh.Form)
 
 	if m.huhForm.State == huh.StateCompleted {
-		// Parse numeric fields
-		conc, _ := strconv.Atoi(strings.TrimSpace(m.concStr))
-		rate, _ := strconv.ParseFloat(strings.TrimSpace(m.rateStr), 64)
-		timeout, _ := strconv.Atoi(strings.TrimSpace(m.timeoutStr))
+		conc, _ := strconv.Atoi(strings.TrimSpace(*m.pConc))
+		rate, _ := strconv.ParseFloat(strings.TrimSpace(*m.pRate), 64)
+		timeout, _ := strconv.Atoi(strings.TrimSpace(*m.pTimeout))
 		if conc <= 0 { conc = 5000 }
 		if rate <= 0 { rate = 5 }
 		if timeout <= 0 { timeout = 5 }
-		if m.cfg.OutputFile == "" { m.cfg.OutputFile = "goods.txt" }
 
+		m.cfg.TargetsFile = strings.TrimSpace(*m.pTargets)
+		m.cfg.UsersFile   = strings.TrimSpace(*m.pUsers)
+		m.cfg.PassFile    = strings.TrimSpace(*m.pPass)
+		m.cfg.OutputFile  = strings.TrimSpace(*m.pOutput)
+		if m.cfg.OutputFile == "" { m.cfg.OutputFile = "goods.txt" }
 		m.cfg.Concurrency = conc
-		m.cfg.RatePerIP = rate
+		m.cfg.RatePerIP   = rate
 		m.cfg.TimeoutSecs = timeout
-		m.cfg.Spray = m.modeStr == "spray"
+		m.cfg.Spray       = *m.pMode == "spray"
+		m.cfg.Resume      = *m.pResume
 
 		return m, func() tea.Msg {
 			return formSubmittedMsg{cfg: m.cfg}

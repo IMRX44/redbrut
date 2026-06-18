@@ -14,12 +14,12 @@ import (
 
 // Config holds worker pool settings.
 type Config struct {
-	Concurrency int
-	RatePerIP   float64
-	Timeout     time.Duration
+	Concurrency  int
+	RatePerIP    float64
+	Timeout      time.Duration
 	LockoutPause time.Duration
-	MaxRetries  int
-	NoRetry     bool
+	MaxRetries   int
+	NoRetry      bool
 }
 
 // Pool is the goroutine pool that dispatches RDP attempts.
@@ -28,7 +28,7 @@ type Pool struct {
 	limiter  *IPLimiter
 	reporter *output.Reporter
 	stats    *stats.Stats
-	done     map[string]bool // resume state
+	done     map[string]bool
 }
 
 func NewPool(cfg Config, reporter *output.Reporter, s *stats.Stats, done map[string]bool) *Pool {
@@ -41,29 +41,26 @@ func NewPool(cfg Config, reporter *output.Reporter, s *stats.Stats, done map[str
 	}
 }
 
-// Run processes all jobs from the channel until it's closed or ctx is cancelled.
+// Run processes all jobs until jobs channel is closed or ctx is cancelled.
+// retryQueue is closed only after all workers spawned from the main jobs have
+// finished, preventing a "send on closed channel" panic.
 func (p *Pool) Run(ctx context.Context, jobs <-chan input.Job) {
 	sem := make(chan struct{}, p.cfg.Concurrency)
 	retryQueue := make(chan input.Job, 100000)
 
-	var wg sync.WaitGroup
+	var workerWg sync.WaitGroup
 
-	// Retry dispatcher — feeds back into workers
-	wg.Add(1)
+	// Main dispatch: drains jobs, spawns workers. Closes retryQueue only
+	// after all spawned workers are done so they can safely enqueue retries.
 	go func() {
-		defer wg.Done()
-		defer close(retryQueue)
-		p.dispatch(ctx, jobs, sem, retryQueue, &wg)
+		p.dispatch(ctx, jobs, sem, retryQueue, &workerWg)
+		workerWg.Wait()
+		close(retryQueue)
 	}()
 
-	// Process retries
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		p.dispatch(ctx, retryQueue, sem, nil, &wg)
-	}()
-
-	wg.Wait()
+	// Retry dispatch: drains retryQueue (closed above), spawns retry workers.
+	p.dispatch(ctx, retryQueue, sem, nil, &workerWg)
+	workerWg.Wait()
 }
 
 func (p *Pool) dispatch(ctx context.Context, jobs <-chan input.Job, sem chan struct{}, retryQueue chan<- input.Job, wg *sync.WaitGroup) {
@@ -82,7 +79,6 @@ func (p *Pool) dispatch(ctx context.Context, jobs <-chan input.Job, sem chan str
 			}
 
 			if p.limiter.IsPaused(job.Target.Host) {
-				// Re-queue after pause or skip if no retry channel
 				if retryQueue != nil {
 					time.Sleep(100 * time.Millisecond)
 					retryQueue <- job
@@ -134,6 +130,7 @@ func (p *Pool) attempt(ctx context.Context, job input.Job, retryQueue chan<- inp
 				backoff = 16 * time.Second
 			}
 			time.Sleep(backoff)
+			p.stats.Retrying.Add(-1)
 			retryQueue <- job
 		}
 	}

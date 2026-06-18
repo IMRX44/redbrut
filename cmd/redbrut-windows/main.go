@@ -2,8 +2,8 @@
 
 package main
 
-import "github.com/imrx44/redbrut/internal/tui"
+import "github.com/imrx44/redbrut/internal/gui"
 
 func main() {
-	tui.Run()
+	gui.Run()
 }
