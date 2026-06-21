@@ -42,25 +42,35 @@ func NewPool(cfg Config, reporter *output.Reporter, s *stats.Stats, done map[str
 }
 
 // Run processes all jobs until jobs channel is closed or ctx is cancelled.
-// retryQueue is closed only after all workers spawned from the main jobs have
-// finished, preventing a "send on closed channel" panic.
 func (p *Pool) Run(ctx context.Context, jobs <-chan input.Job) {
 	sem := make(chan struct{}, p.cfg.Concurrency)
-	retryQueue := make(chan input.Job, 100000)
 
-	var workerWg sync.WaitGroup
+	// Large buffer so backoff goroutines can enqueue retries without blocking.
+	retryQueue := make(chan input.Job, 500000)
 
-	// Main dispatch: drains jobs, spawns workers. Closes retryQueue only
-	// after all spawned workers are done so they can safely enqueue retries.
+	var wg sync.WaitGroup
+
+	// Main dispatch: drains jobs, spawns workers.
+	// Closes retryQueue only after all workers finish (prevents send-on-closed panic).
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		var workerWg sync.WaitGroup
 		p.dispatch(ctx, jobs, sem, retryQueue, &workerWg)
 		workerWg.Wait()
 		close(retryQueue)
 	}()
 
-	// Retry dispatch: drains retryQueue (closed above), spawns retry workers.
-	p.dispatch(ctx, retryQueue, sem, nil, &workerWg)
-	workerWg.Wait()
+	// Retry dispatch: drains retryQueue until closed.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var workerWg sync.WaitGroup
+		p.dispatch(ctx, retryQueue, sem, nil, &workerWg)
+		workerWg.Wait()
+	}()
+
+	wg.Wait()
 }
 
 func (p *Pool) dispatch(ctx context.Context, jobs <-chan input.Job, sem chan struct{}, retryQueue chan<- input.Job, wg *sync.WaitGroup) {
@@ -80,7 +90,12 @@ func (p *Pool) dispatch(ctx context.Context, jobs <-chan input.Job, sem chan str
 
 			if p.limiter.IsPaused(job.Target.Host) {
 				if retryQueue != nil {
-					retryQueue <- job
+					// Re-queue without sleeping — keep dispatch loop responsive.
+					select {
+					case retryQueue <- job:
+					case <-ctx.Done():
+						return
+					}
 				}
 				continue
 			}
@@ -128,9 +143,21 @@ func (p *Pool) attempt(ctx context.Context, job input.Job, retryQueue chan<- inp
 			if backoff > 16*time.Second {
 				backoff = 16 * time.Second
 			}
-			time.Sleep(backoff)
-			p.stats.Retrying.Add(-1)
-			retryQueue <- job
+			// Backoff in a lightweight goroutine — does NOT hold the semaphore slot.
+			// This keeps all concurrency slots free for active connection attempts.
+			go func(j input.Job, delay time.Duration) {
+				select {
+				case <-time.After(delay):
+					p.stats.Retrying.Add(-1)
+					select {
+					case retryQueue <- j:
+					default:
+						// Buffer full — drop retry
+					}
+				case <-ctx.Done():
+					p.stats.Retrying.Add(-1)
+				}
+			}(job, backoff)
 		}
 	}
 }
