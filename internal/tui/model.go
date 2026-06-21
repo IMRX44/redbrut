@@ -42,13 +42,17 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenForm {
 			m.form.width = msg.Width
 			m.form.height = msg.Height
-			m.form.huhForm = m.form.buildForm()
+			// Update only the huh form's width without rebuilding (which would reset inputs).
+			m.form.huhForm = m.form.huhForm.WithWidth(min(msg.Width-4, 80))
 		}
 
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
 			if m.screen == screenMonitor && m.monitor.session != nil {
 				m.monitor.session.Cancel()
+			}
+			if m.reporter != nil {
+				m.reporter.Close()
 			}
 			return m, tea.Quit
 		}

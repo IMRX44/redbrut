@@ -35,11 +35,17 @@ func ParseTarget(s string) (Target, error) {
 	if idx := strings.LastIndex(s, ":"); idx != -1 {
 		host := s[:idx]
 		portStr := s[idx+1:]
+		if host == "" {
+			return Target{}, fmt.Errorf("empty host in %q", s)
+		}
 		port, err := strconv.Atoi(portStr)
 		if err != nil || port < 1 || port > 65535 {
 			return Target{}, fmt.Errorf("invalid port in %q", s)
 		}
 		return Target{Host: host, Port: port}, nil
+	}
+	if s == "" {
+		return Target{}, fmt.Errorf("empty target")
 	}
 	return Target{Host: s, Port: 3389}, nil
 }

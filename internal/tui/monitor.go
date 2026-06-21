@@ -197,6 +197,15 @@ func (m MonitorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m MonitorModel) View() string {
 	if m.session == nil {
+		if m.done {
+			var b strings.Builder
+			b.WriteString(styleHeader.Render(" redbrut  ▸  Startup Error"))
+			b.WriteString("\n\n")
+			b.WriteString(m.viewport.View())
+			b.WriteString("\n")
+			b.WriteString(styleHint.Render("  q to quit"))
+			return b.String()
+		}
 		return styleHint.Render("  Initializing...")
 	}
 

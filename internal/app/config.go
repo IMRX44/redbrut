@@ -95,7 +95,7 @@ func Start(cfg Config, reporter *output.Reporter) (*Session, error) {
 	}
 
 	s := &stats.Stats{}
-	s.Total = int64(len(targets)) * int64(len(users)) * int64(len(passwords))
+	s.Total = int64(len(targets))*int64(len(users))*int64(len(passwords)) - int64(len(doneJobs))
 
 	pool := worker.NewPool(worker.Config{
 		Concurrency:  cfg.Concurrency,

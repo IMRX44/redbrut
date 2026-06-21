@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,24 +23,58 @@ jobs:
           go-version: '1.24'
 
       - name: Build Linux amd64
-        run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
-            -o redbrut-linux-amd64 \
-            ./cmd/redbrut-linux/
+        run: GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o redbrut-linux-amd64 ./cmd/redbrut-linux/
 
       - name: Build Linux arm64
+        run: GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o redbrut-linux-arm64 ./cmd/redbrut-linux/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            redbrut-linux-amd64
+            redbrut-linux-arm64
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Add MinGW to PATH
+        run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build Windows amd64
         run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" \
-            -o redbrut-linux-arm64 \
-            ./cmd/redbrut-linux/
+          $env:CGO_ENABLED = "1"
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -ldflags="-s -w -H windowsgui" -o redbrut-windows-amd64.exe ./cmd/redbrut-windows/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: redbrut-windows-amd64.exe
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-binaries
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
 
       - name: Create checksums
-        run: |
-          sha256sum redbrut-linux-amd64 redbrut-linux-arm64 > checksums.txt
-          cat checksums.txt
+        run: sha256sum redbrut-linux-amd64 redbrut-linux-arm64 redbrut-windows-amd64.exe > checksums.txt
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version }}
           name: redbrut ${{ github.event.inputs.version }}
@@ -54,26 +88,20 @@ jobs:
             |------|----------|------|
             | `redbrut-linux-amd64` | Linux | x86_64 |
             | `redbrut-linux-arm64` | Linux | ARM64 |
+            | `redbrut-windows-amd64.exe` | Windows | x86_64 (GUI) |
 
-            > **Windows:** Build from source with `go build ./cmd/redbrut-windows/` on a Windows machine with MinGW.
-
-            ### What's new
-            - Custom NLA/CredSSP handshake — pure Go, no FreeRDP
-            - NTLMv2 with full Unicode support (Russian/Chinese passwords)
-            - 5,000+ goroutines vs NLBrute's 500 OS threads
-            - NTSTATUS-based result classification — no false negatives
-            - Interactive bubbletea TUI on Linux
-            - Dark-themed fyne GUI on Windows
-            - Resume support, per-IP rate limiting, password spray mode
-
-            ### Usage
-            ```bash
-            chmod +x redbrut-linux-amd64
-            ./redbrut-linux-amd64
-            ```
+            ### Highlights
+            - Pure Go NLA/CredSSP — no FreeRDP dependency
+            - NTLMv2 with UTF-16LE encoding — Russian/Chinese/Arabic passwords work
+            - 5,000 goroutines vs NLBrute's 500 OS threads
+            - NTSTATUS classification — zero false negatives
+            - Linux: interactive TUI — form config + live monitor
+            - Windows: native fyne GUI
+            - Per-IP rate limiting, resume support, password spray mode
           files: |
             redbrut-linux-amd64
             redbrut-linux-arm64
+            redbrut-windows-amd64.exe
             checksums.txt
           draft: false
           prerelease: false
