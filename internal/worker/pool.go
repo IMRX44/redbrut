@@ -80,7 +80,6 @@ func (p *Pool) dispatch(ctx context.Context, jobs <-chan input.Job, sem chan str
 
 			if p.limiter.IsPaused(job.Target.Host) {
 				if retryQueue != nil {
-					time.Sleep(100 * time.Millisecond)
 					retryQueue <- job
 				}
 				continue

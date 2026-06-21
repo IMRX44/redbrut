@@ -40,9 +40,13 @@ func NewReporter(goodsPath, resumePath string, jsonMode bool) (*Reporter, error)
 	return &Reporter{goodsFile: gf, resumeFile: rf, jsonMode: jsonMode}, nil
 }
 
-func (r *Reporter) Close() {
-	r.goodsFile.Close()
-	r.resumeFile.Close()
+func (r *Reporter) Close() error {
+	err1 := r.goodsFile.Close()
+	err2 := r.resumeFile.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }
 
 // WriteResult records a completed job.
@@ -61,8 +65,9 @@ func (r *Reporter) WriteResult(res Result) {
 				"password": res.Job.Password,
 				"status":   res.Status.String(),
 			}
-			data, _ := json.Marshal(entry)
-			fmt.Fprintf(r.goodsFile, "%s\n", data)
+			if data, err := json.Marshal(entry); err == nil {
+				fmt.Fprintf(r.goodsFile, "%s\n", data)
+			}
 		} else {
 			fmt.Fprintf(r.goodsFile, "%s\t%s\t%s\n",
 				res.Job.Target, res.Job.Username, res.Job.Password)
@@ -89,7 +94,7 @@ func LoadResumeState(path string) (map[string]bool, error) {
 	var target, user, pass, status string
 	for {
 		n, _ := fmt.Fscanf(f, "%s\t%s\t%s\t%s\n", &target, &user, &pass, &status)
-		if n == 0 {
+		if n < 4 {
 			break
 		}
 		done[target+"\t"+user+"\t"+pass] = true

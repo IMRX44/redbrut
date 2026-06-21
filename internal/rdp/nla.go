@@ -3,11 +3,13 @@ package rdp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/asn1"
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"math/rand"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -194,8 +196,8 @@ func parseNTLMChallenge(msg []byte) (*ntlmChallenge, error) {
 func buildNTLMAuthenticate(challenge *ntlmChallenge, username, domain, password, workstation string) ([]byte, error) {
 	// NTLMv2 response
 	clientChallenge := make([]byte, 8)
-	for i := range clientChallenge {
-		clientChallenge[i] = byte(rand.Intn(256))
+	if _, err := rand.Read(clientChallenge); err != nil {
+		return nil, fmt.Errorf("rand: %w", err)
 	}
 
 	ntResponse, sessionKey, err := computeNTLMv2(
@@ -208,8 +210,8 @@ func buildNTLMAuthenticate(challenge *ntlmChallenge, username, domain, password,
 	}
 	_ = sessionKey
 
-	userUTF16 := encodeUTF16LE(strings.ToUpper(username))
-	domainUTF16 := encodeUTF16LE(strings.ToUpper(domain))
+	userUTF16 := encodeUTF16LE(username)
+	domainUTF16 := encodeUTF16LE(domain)
 	wsUTF16 := encodeUTF16LE(workstation)
 
 	// Layout: fixed header (72 bytes) + variable data
@@ -267,11 +269,12 @@ var ntlmOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 2, 2, 10}
 func wrapSPNEGONegTokenInit(ntlmToken []byte) []byte {
 	// NegTokenInit: mechTypes=[NTLMSSP], mechToken=ntlmToken
 	mechTypeBytes, _ := asn1.Marshal([]asn1.ObjectIdentifier{ntlmOID})
-	tokenSeq, _ := asn1.Marshal(asn1.RawValue{
-		Class:       asn1.ClassContextSpecific,
-		Tag:         2,
-		IsCompound:  false,
-		Bytes:       ntlmToken,
+	// mechToken is [2] IMPLICIT OCTET STRING — one context tag only, no extra wrapping.
+	mechTokenField, _ := asn1.Marshal(asn1.RawValue{
+		Class:      asn1.ClassContextSpecific,
+		Tag:        2,
+		IsCompound: false,
+		Bytes:      ntlmToken,
 	})
 	initSeq, _ := asn1.Marshal(asn1.RawValue{
 		Class:      asn1.ClassUniversal,
@@ -279,7 +282,7 @@ func wrapSPNEGONegTokenInit(ntlmToken []byte) []byte {
 		IsCompound: true,
 		Bytes: append(
 			asn1MarshalExplicit(0, mechTypeBytes),
-			asn1MarshalExplicit(2, tokenSeq)...,
+			mechTokenField...,
 		),
 	})
 	// Wrap in SPNEGO OID application tag
@@ -298,7 +301,8 @@ func wrapSPNEGONegTokenInit(ntlmToken []byte) []byte {
 func wrapSPNEGONegTokenResp(ntlmToken []byte) []byte {
 	// NegTokenResp: negState=accept-incomplete, responseToken=ntlmToken
 	stateBytes, _ := asn1.Marshal(asn1.Enumerated(1)) // accept-incomplete
-	tokenBytes, _ := asn1.Marshal(asn1.RawValue{
+	// responseToken is [2] IMPLICIT OCTET STRING — one context tag only.
+	responseTokenField, _ := asn1.Marshal(asn1.RawValue{
 		Class: asn1.ClassContextSpecific, Tag: 2,
 		IsCompound: false, Bytes: ntlmToken,
 	})
@@ -306,7 +310,7 @@ func wrapSPNEGONegTokenResp(ntlmToken []byte) []byte {
 		Class: asn1.ClassUniversal, Tag: asn1.TagSequence, IsCompound: true,
 		Bytes: append(
 			asn1MarshalExplicit(0, stateBytes),
-			asn1MarshalExplicit(2, tokenBytes)...,
+			responseTokenField...,
 		),
 	})
 	resp, _ := asn1.Marshal(asn1.RawValue{
@@ -495,7 +499,7 @@ func extractNTStatusFromTSRequest(data []byte) (uint32, error) {
 			var codeVal asn1.RawValue
 			if _, err := asn1.Unmarshal(field.Bytes, &codeVal); err == nil {
 				if len(codeVal.Bytes) >= 4 {
-					code := binary.BigEndian.Uint32(codeVal.Bytes[len(codeVal.Bytes)-4:])
+					code := binary.LittleEndian.Uint32(codeVal.Bytes[len(codeVal.Bytes)-4:])
 					return code, nil
 				}
 			}
@@ -543,6 +547,10 @@ func isEOF(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// connection reset by peer also means the server rejected credentials
 	s := err.Error()
-	return strings.Contains(s, "EOF") || strings.Contains(s, "connection reset")
+	return strings.Contains(s, "connection reset") || strings.Contains(s, "forcibly closed")
 }

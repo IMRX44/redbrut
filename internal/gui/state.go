@@ -124,7 +124,7 @@ func (s *UIState) stopSession() {
 }
 
 func (s *UIState) runTicker() {
-	startTime := time.Now()
+	lastTime := time.Now()
 	lastAttempts := int64(0)
 
 	for {
@@ -138,16 +138,21 @@ func (s *UIState) runTicker() {
 			return
 		}
 
+		now := time.Now()
+		elapsed := now.Sub(lastTime).Seconds()
+		lastTime = now
+
 		attempts := session.Stats.Attempts.Load()
 		found := session.Stats.Found.Load()
 		locked := session.Stats.Locked.Load()
 		errors := session.Stats.Errors.Load()
 		total := session.Stats.Total
 
-		elapsed := time.Since(startTime).Seconds()
-		speed := float64(attempts-lastAttempts) / 0.3
+		var speed float64
+		if elapsed > 0 {
+			speed = float64(attempts-lastAttempts) / elapsed
+		}
 		lastAttempts = attempts
-		_ = elapsed
 
 		var pct float64
 		if total > 0 {
